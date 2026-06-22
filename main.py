@@ -31,14 +31,41 @@ def push(title):
 
 
 def parse_cookie(raw):
+    """Accept multiple formats:
+       1. semicolon: 'k=v; k=v'
+       2. newline + '=':     k=v\nk=v
+       3. newline + tab/space:  k<TAB>v\nk<TAB>v  (DevTools table copy)
+    """
     out = {}
-    for part in raw.split(';'):
+    # try semicolon split first (covers format 1 and 2 if '=' present)
+    parts = []
+    if ';' in raw:
+        parts = raw.split(';')
+    elif '\n' in raw:
+        parts = raw.splitlines()
+    else:
+        parts = [raw]
+
+    for part in parts:
         part = part.strip()
-        if not part or '=' not in part:
+        if not part:
             continue
-        k, _, v = part.partition('=')
+        if '=' in part:
+            k, _, v = part.partition('=')
+        elif '\t' in part:
+            k, _, v = part.partition('\t')
+        else:
+            # last resort: first whitespace
+            sp = part.split(None, 1)
+            if len(sp) != 2:
+                continue
+            k, v = sp
         out[k.strip()] = v.strip()
     return out
+
+
+def to_cookie_header(cookie_map):
+    return '; '.join(f'{k}={v}' for k, v in cookie_map.items())
 
 
 def days_left(cookie_map):
@@ -56,7 +83,16 @@ def run():
 
     cmap = parse_cookie(cookie_str)
     print(f'域名: {base_url}')
-    print(f'cookie 字段: {sorted(cmap.keys())}')
+    print(f'cookie 原始长度: {len(cookie_str)}, 解析到字段: {sorted(cmap.keys())}')
+    if not cmap:
+        raise RuntimeError(
+            'IKUUU_COOKIE 解析失败。期望格式（一行）: uid=XXX; key=XXX; email=XXX; ip=XXX; expire_in=XXX'
+        )
+    required = {'uid', 'key'}
+    missing = required - set(cmap.keys())
+    if missing:
+        raise RuntimeError(f'IKUUU_COOKIE 缺少必要字段: {missing}')
+    headers['cookie'] = to_cookie_header(cmap)
 
     dl = days_left(cmap)
     cookie_warning = None
