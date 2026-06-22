@@ -1,18 +1,22 @@
 import json, os, sys, time
+from datetime import datetime, timezone
 import requests
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-email   = os.environ.get('EMAIL')
-passwd  = os.environ.get('PASSWD')
-SCKEY   = os.environ.get('SCKEY') or ''
+SCKEY = os.environ.get('SCKEY') or ''
+cookie_str = (os.environ.get('IKUUU_COOKIE') or '').strip()
 base_url = (os.environ.get('AIRPORT_URL') or 'https://ikuuu.org').rstrip('/')
+warn_days = int(os.environ.get('COOKIE_WARN_DAYS') or '3')
 
-login_page_url = f'{base_url}/auth/login'
-check_url      = f'{base_url}/user/checkin'
-user_url       = f'{base_url}/user'
-logout_url     = f'{base_url}/user/logout'
+check_url = f'{base_url}/user/checkin'
 
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+headers = {
+    'origin': base_url,
+    'referer': f'{base_url}/user',
+    'user-agent': UA,
+    'x-requested-with': 'XMLHttpRequest',
+    'cookie': cookie_str,
+}
 
 
 def push(title):
@@ -26,120 +30,61 @@ def push(title):
         print(f'推送失败: {e}')
 
 
+def parse_cookie(raw):
+    out = {}
+    for part in raw.split(';'):
+        part = part.strip()
+        if not part or '=' not in part:
+            continue
+        k, _, v = part.partition('=')
+        out[k.strip()] = v.strip()
+    return out
+
+
+def days_left(cookie_map):
+    exp = cookie_map.get('expire_in')
+    if not exp or not exp.isdigit():
+        return None
+    expires_at = datetime.fromtimestamp(int(exp), tz=timezone.utc)
+    delta = expires_at - datetime.now(tz=timezone.utc)
+    return delta.total_seconds() / 86400.0, expires_at
+
+
 def run():
+    if not cookie_str:
+        raise RuntimeError('IKUUU_COOKIE secret 未设置')
+
+    cmap = parse_cookie(cookie_str)
     print(f'域名: {base_url}')
-    if not email or not passwd:
-        raise RuntimeError('EMAIL / PASSWD secret 未设置')
+    print(f'cookie 字段: {sorted(cmap.keys())}')
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-blink-features=AutomationControlled'])
-        context = browser.new_context(user_agent=UA, locale='zh-CN', viewport={'width': 1280, 'height': 800})
-        page = context.new_page()
+    dl = days_left(cmap)
+    cookie_warning = None
+    if dl is not None:
+        days, expires_at = dl
+        print(f'cookie 过期: {expires_at.isoformat()} (剩 {days:.1f} 天)')
+        if days <= 0:
+            cookie_warning = f'Cookie 已过期 ({expires_at.isoformat()})，请刷新 IKUUU_COOKIE secret'
+        elif days <= warn_days:
+            cookie_warning = f'Cookie 还剩 {days:.1f} 天到期 ({expires_at.isoformat()})，请刷新 IKUUU_COOKIE secret'
 
-        print('打开登录页...')
-        page.goto(login_page_url, wait_until='networkidle', timeout=30000)
+    print('进行签到...')
+    resp = requests.post(check_url, headers=headers, timeout=15)
+    print(f'checkin status={resp.status_code} body={resp.text[:300]}')
+    try:
+        result = json.loads(resp.text)
+        content = result.get('msg', f'无 msg 字段, raw={resp.text[:120]}')
+    except Exception:
+        content = f'签到响应非 JSON: {resp.text[:120]}'
 
-        # Wait for form rendered by decoded JS, then locate fields dynamically
-        page.wait_for_selector('input[type="email"], input[name="email"], #email', timeout=15000)
-
-        def dump_inputs(tag):
-            info = page.evaluate("""() => Array.from(document.querySelectorAll('input,button')).map(e => ({
-                tag: e.tagName, type: e.type, name: e.name, id: e.id,
-                placeholder: e.placeholder, cls: e.className
-            }))""")
-            print(f'[{tag}] form elements: {json.dumps(info, ensure_ascii=False)[:1000]}')
-
-        try:
-            page.fill('input[type="email"], input[name="email"], #email', email)
-        except Exception as ex:
-            dump_inputs('email-fail')
-            raise
-
-        pw_selectors = [
-            'input[name="passwd"]',
-            'input[name="password"]',
-            'input[type="password"]',
-            '#passwd', '#password',
-        ]
-        pw_filled = False
-        for sel in pw_selectors:
-            try:
-                if page.locator(sel).count() > 0:
-                    page.fill(sel, passwd)
-                    pw_filled = True
-                    print(f'密码字段命中: {sel}')
-                    break
-            except Exception:
-                continue
-        if not pw_filled:
-            dump_inputs('passwd-miss')
-            raise RuntimeError('未找到密码输入框')
-
-        print('提交登录...')
-        # Capture login XHR response
-        submit_selectors = ['button[type="submit"]', 'input[type="submit"]', '#login', 'button#login', 'button.login']
-        with page.expect_response(lambda r: '/auth/login' in r.url and r.request.method == 'POST', timeout=20000) as resp_info:
-            clicked = False
-            for sel in submit_selectors:
-                if page.locator(sel).count() > 0:
-                    page.click(sel)
-                    clicked = True
-                    print(f'提交按钮命中: {sel}')
-                    break
-            if not clicked:
-                dump_inputs('submit-miss')
-                # Fallback: press Enter on password field
-                page.locator(pw_selectors[0]).press('Enter')
-        login_resp = resp_info.value
-        login_body = login_resp.text()
-        print(f'login status={login_resp.status} body={login_body[:300]}')
-        try:
-            lj = json.loads(login_body)
-        except Exception:
-            lj = {}
-        if lj.get('ret') != 1:
-            raise RuntimeError(f'登录失败: {lj.get("msg") or login_body[:200]}')
-        print(lj.get('msg'))
-
-        # Settle any redirect after login
-        try:
-            page.wait_for_load_state('networkidle', timeout=10000)
-        except PWTimeout:
-            pass
-
-        print('进行签到...')
-        # POST checkin from inside the page so cookies + any anti-bot tokens are present
-        chk_body = page.evaluate(
-            """async (u) => {
-                const r = await fetch(u, {
-                    method: 'POST',
-                    headers: {'X-Requested-With': 'XMLHttpRequest'},
-                    credentials: 'include'
-                });
-                const t = await r.text();
-                return {status: r.status, body: t};
-            }""",
-            check_url,
-        )
-        print(f'checkin status={chk_body["status"]} body={chk_body["body"][:300]}')
-        try:
-            cj = json.loads(chk_body['body'])
-            content = cj.get('msg', '签到响应无 msg')
-        except Exception:
-            content = f'签到响应非 JSON: {chk_body["body"][:120]}'
-        print(content)
-
-        try:
-            page.goto(logout_url, timeout=10000)
-        except Exception:
-            pass
-        context.close()
-        browser.close()
-        return content
+    if cookie_warning:
+        content = f'{content} | ⚠️ {cookie_warning}'
+    return content
 
 
 try:
     msg = run()
+    print(msg)
     push(msg)
 except Exception as e:
     err = f'签到失败: {e}'
