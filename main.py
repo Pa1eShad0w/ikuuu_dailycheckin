@@ -39,15 +39,57 @@ def run():
         print('打开登录页...')
         page.goto(login_page_url, wait_until='networkidle', timeout=30000)
 
-        # Wait for form fields rendered by decoded JS
-        page.wait_for_selector('input[name="email"], #email', timeout=15000)
-        page.fill('input[name="email"], #email', email)
-        page.fill('input[name="passwd"], #passwd', passwd)
+        # Wait for form rendered by decoded JS, then locate fields dynamically
+        page.wait_for_selector('input[type="email"], input[name="email"], #email', timeout=15000)
+
+        def dump_inputs(tag):
+            info = page.evaluate("""() => Array.from(document.querySelectorAll('input,button')).map(e => ({
+                tag: e.tagName, type: e.type, name: e.name, id: e.id,
+                placeholder: e.placeholder, cls: e.className
+            }))""")
+            print(f'[{tag}] form elements: {json.dumps(info, ensure_ascii=False)[:1000]}')
+
+        try:
+            page.fill('input[type="email"], input[name="email"], #email', email)
+        except Exception as ex:
+            dump_inputs('email-fail')
+            raise
+
+        pw_selectors = [
+            'input[name="passwd"]',
+            'input[name="password"]',
+            'input[type="password"]',
+            '#passwd', '#password',
+        ]
+        pw_filled = False
+        for sel in pw_selectors:
+            try:
+                if page.locator(sel).count() > 0:
+                    page.fill(sel, passwd)
+                    pw_filled = True
+                    print(f'密码字段命中: {sel}')
+                    break
+            except Exception:
+                continue
+        if not pw_filled:
+            dump_inputs('passwd-miss')
+            raise RuntimeError('未找到密码输入框')
 
         print('提交登录...')
         # Capture login XHR response
+        submit_selectors = ['button[type="submit"]', 'input[type="submit"]', '#login', 'button#login', 'button.login']
         with page.expect_response(lambda r: '/auth/login' in r.url and r.request.method == 'POST', timeout=20000) as resp_info:
-            page.click('button[type="submit"], #login')
+            clicked = False
+            for sel in submit_selectors:
+                if page.locator(sel).count() > 0:
+                    page.click(sel)
+                    clicked = True
+                    print(f'提交按钮命中: {sel}')
+                    break
+            if not clicked:
+                dump_inputs('submit-miss')
+                # Fallback: press Enter on password field
+                page.locator(pw_selectors[0]).press('Enter')
         login_resp = resp_info.value
         login_body = login_resp.text()
         print(f'login status={login_resp.status} body={login_body[:300]}')
