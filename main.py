@@ -1,45 +1,59 @@
-import requests, json, re, os
+import requests, json, os
 
 session = requests.session()
-# 配置用户名（一般是邮箱）
-email = os.environ.get('EMAIL')
-# 配置用户名对应的密码 和上面的email对应上
-passwd = os.environ.get('PASSWD')
-# server酱
-SCKEY = os.environ.get('SCKEY')
 
-login_url = 'https://ikuuu.art/auth/login'
-check_url = 'https://ikuuu.art/user/checkin'
-info_url = 'https://ikuuu.art/user/profile'
+email = os.environ.get('EMAIL')
+passwd = os.environ.get('PASSWD')
+SCKEY = os.environ.get('SCKEY') or ''
+# Airport mirror domain (changes periodically). Override via secret AIRPORT_URL if blocked.
+base_url = (os.environ.get('AIRPORT_URL') or 'https://ikuuu.org').rstrip('/')
+
+login_page_url = f'{base_url}/auth/login'
+login_url      = f'{base_url}/auth/login'
+check_url      = f'{base_url}/user/checkin'
+logout_url     = f'{base_url}/user/logout'
 
 header = {
-        'origin': 'https://ikuuu.art',
-        'user-agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'
+    'origin': base_url,
+    'referer': login_page_url,
+    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'x-requested-with': 'XMLHttpRequest',
 }
-data = {
-        'email': email,
-        'passwd': passwd
-}
-try:
-    print('进行登录...')
-    response = json.loads(session.post(url=login_url,headers=header,data=data).text)
-    print(response['msg'])
-    # 获取账号名称
-    info_html = session.get(url=info_url,headers=header).text
-#     info = "".join(re.findall('<span class="user-name text-bold-600">(.*?)</span>', info_html, re.S))
-#     print(info)
-    # 进行签到
-    result = json.loads(session.post(url=check_url,headers=header).text)
-    print(result['msg'])
-    content = result['msg']
-    # 进行推送
-    if SCKEY != '':
-        push_url = 'https://sctapi.ftqq.com/{}.send?title=ikuu签到-{}'.format(SCKEY, content)
-        requests.post(url=push_url)
+data = {'email': email, 'passwd': passwd}
+
+
+def push(title):
+    if not SCKEY:
+        return
+    url = f'https://sctapi.ftqq.com/{SCKEY}.send?title=ikuu签到-{title}'
+    try:
+        requests.post(url=url, timeout=10)
         print('推送成功')
-except:
-    content = '签到失败'
+    except Exception as e:
+        print(f'推送失败: {e}')
+
+
+try:
+    print(f'域名: {base_url}')
+    print('预热登录页...')
+    session.get(login_page_url, headers={'user-agent': header['user-agent']}, timeout=15)
+
+    print('进行登录...')
+    resp = session.post(url=login_url, headers=header, data=data, timeout=15)
+    print(f'login status={resp.status_code} body={resp.text[:300]}')
+    login_json = json.loads(resp.text)
+    print(login_json.get('msg'))
+
+    print('进行签到...')
+    chk = session.post(url=check_url, headers=header, timeout=15)
+    print(f'checkin status={chk.status_code} body={chk.text[:300]}')
+    result = json.loads(chk.text)
+    content = result.get('msg', '签到响应无 msg')
     print(content)
-    if SCKEY != '':
-        push_url = 'https://sctapi.ftqq.com/{}.send?title=ikuu签到-{}'.format(SCKEY, content)
-        requests.post(url=push_url)
+
+    push(content)
+    session.get(logout_url, headers=header, timeout=10)
+except Exception as e:
+    content = f'签到失败: {e}'
+    print(content)
+    push(content)
